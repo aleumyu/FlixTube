@@ -11,11 +11,11 @@ if (!process.env.PORT) {
     'Please specify the port number for the HTTP server with the environment variable PORT.'
   );
 }
-const PORT = process.env.PORT;
+const PORT = process.env.PORT || 3000;
 
 // Defines the HTTP route for streaming video. This is a REST API for streaming video!
 app.get('/video', (req, res) => {
-  const path = '../../Documents/cherryblossom.mp4';
+  const path = '../videos/cherryblossom.mp4';
 
   // Retrieves the video file size. We’ll encode this in the HTTP header as a response to the web browser.
   fs.stat(path, (err, stats) => {
