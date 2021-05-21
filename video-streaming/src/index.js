@@ -1,44 +1,99 @@
-const express = require('express');
-// Loads the (built-in) fs library so we can use the Node.js filesystem API.
-const fs = require('fs');
-const path = require('path');
+const express = require("express");
+const fs = require("fs");
+const amqp = require('amqplib');
 
-const app = express();
+if (!process.env.RABBIT) {
+    throw new Error("Please specify the name of the RabbitMQ host using environment variable RABBIT");
+}
 
-// We will configure our microservices using environment variables.
-// Specifically, in this case, we need a single environment variable to set the port number for the HTTP server
-// Port can be thought of as an input or parameter to our microservice
-// if (!process.env.PORT) {
-//   throw new Error(
-//     'Please specify the port number for the HTTP server with the environment variable PORT.'
-//   );
-// }
-const PORT = process.env.PORT || 3000;
+const RABBIT = process.env.RABBIT;
 
-// Defines the HTTP route for streaming video. This is a REST API for streaming video!
-app.get('/video', (req, res) => {
-  const videoPath = path.join('./videos', 'cherryblossom.mp4');
+//
+// Connect to the RabbitMQ server.
+//
+function connectRabbit() {
 
-  // Retrieves the video file size. We’ll encode this in the HTTP header as a response to the web browser.
-  fs.stat(videoPath, (err, stats) => {
-    if (err) {
-      console.error('An error occurred', err);
-      res.sendStatus(500);
-      return;
-    }
+    console.log(`Connecting to RabbitMQ server at ${RABBIT}.`);
 
-    //Sends a response header to the web browser, including the content length and mime type
-    res.writeHead(200, {
-      'Content-Length': stats.size,
-      'Content-Type': 'video/mp4',
+    return amqp.connect(RABBIT) // Connect to the RabbitMQ server.
+        .then(connection => {
+            console.log("Connected to RabbitMQ.");
+
+            return connection.createChannel() // Create a RabbitMQ messaging channel.
+                .then(messageChannel => {
+                    return messageChannel.assertExchange("viewed", "fanout") // Assert that we have a "viewed" exchange.
+                        .then(() => {
+                            return messageChannel;
+                        });
+                });
+        });
+}
+
+//
+// Send the "viewed" to the history microservice.
+//
+function sendViewedMessage(messageChannel, videoPath) {
+    console.log(`Publishing message on "viewed" exchange.`);
+        
+    const msg = { videoPath: videoPath };
+    const jsonMsg = JSON.stringify(msg);
+    messageChannel.publish("viewed", "", Buffer.from(jsonMsg)); // Publish message to the "viewed" exchange.
+}
+
+//
+// Setup event handlers.
+//
+function setupHandlers(app, messageChannel) {
+    app.get("/video", (req, res) => { // Route for streaming video.
+
+        const videoPath = "./videos/SampleVideo_1280x720_1mb.mp4";
+        fs.stat(videoPath, (err, stats) => {
+            if (err) {
+                console.error("An error occurred ");
+                res.sendStatus(500);
+                return;
+            }
+    
+            res.writeHead(200, {
+                "Content-Length": stats.size,
+                "Content-Type": "video/mp4",
+            });
+    
+            fs.createReadStream(videoPath).pipe(res);
+
+            sendViewedMessage(messageChannel, videoPath); // Send message to "history" microservice that this video has been "viewed".
+        });
     });
-    // here we are opening a readable stream from the video file.
-    // Then we are piping the stream to our HTTP response (look for the call to the pipe function).
-    fs.createReadStream(videoPath).pipe(res);
-  });
-});
-app.listen(PORT, () => {
-  console.log(
-    `Microservice listening on port ${PORT}, point your browser at http://localhost:3000/video`
-  );
-});
+}
+
+//
+// Start the HTTP server.
+//
+function startHttpServer(messageChannel) {
+    return new Promise(resolve => { // Wrap in a promise so we can be notified when the server has started.
+        const app = express();
+        setupHandlers(app, messageChannel);
+
+        const port = process.env.PORT && parseInt(process.env.PORT) || 3000;
+        app.listen(port, () => {
+            resolve(); // HTTP server is listening, resolve the promise.
+        });
+    });
+}
+
+//
+// Application entry point.
+//
+function main() {
+    return connectRabbit()                          // Connect to RabbitMQ...
+        .then(messageChannel => {                   // then...
+            return startHttpServer(messageChannel); // start the HTTP server.
+        });
+}
+
+main()
+    .then(() => console.log("Microservice online."))
+    .catch(err => {
+        console.error("Microservice failed to start.");
+        console.error(err && err.stack || err);
+    });
